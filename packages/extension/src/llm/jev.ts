@@ -1,4 +1,4 @@
-import type { Candidate } from "./skills/propose";
+import type { Candidate } from "./pipeline";
 
 export interface JevAssignmentInput {
   tabs: {
@@ -62,7 +62,7 @@ export async function runJevAssignment(
 
   const criteria: Record<string, string> = {};
   for (const c of candidates) {
-    criteria[c.key] = c.title;
+    criteria[c.key] = c.description ? `${c.title} — ${c.description}` : c.title;
   }
 
   const state =
@@ -87,42 +87,58 @@ export async function runJevAssignment(
         : "";
     questions[`tab_${i}`] = {
       type: "choice",
-      instructions: `Tab ${i}${tag} "${tabs[i].title.slice(0, 80)}"${tabs[i].ogDescription ? ` — ${tabs[i].ogDescription.slice(0, 150)}` : ""} — which rabbithole?`,
+      instructions: `Tab ${i}${tag} "${tabs[i].title.slice(0, 80)}"${tabs[i].ogDescription ? ` — ${tabs[i].ogDescription.slice(0, 150)}` : ""} — which rabbithole? Judge by what this specific page is ABOUT, not by its website: different posts, profiles, or articles on the same site are usually different topics. Pick the candidate whose description matches the page's subject; if none match, pick the closest broad one rather than inventing a fit.`,
       criteria,
     };
   }
 
   // Jev's 32k context can't hold criteria (duplicated per question) for a
   // large tab set in one request — batch the questions and merge answers.
-  const batchSize = 50;
+  // Enriched criteria (title + description) are heavier than bare titles, so
+  // the batch size scales with total criteria size to stay under ~24k tokens.
+  const criteriaChars = candidates.reduce(
+    (sum, c) =>
+      sum + c.key.length + c.title.length + (c.description?.length ?? 0) + 4,
+    0,
+  );
+  const criteriaTokensPerQuestion = Math.ceil(criteriaChars / 4);
+  const batchSize = Math.max(
+    5,
+    Math.floor(24000 / Math.max(1, criteriaTokensPerQuestion)),
+  );
   const indices = Object.keys(questions);
   const answers: Record<string, JevAnswer> = {};
+  // parallel batches: Jev batches are independent, and sequential round-trips
+  // dominate categorisation latency on 150+ tab sets
+  const batchPromises: Promise<void>[] = [];
   for (let b = 0; b < indices.length; b += batchSize) {
     const batchQuestions: typeof questions = {};
     for (const key of indices.slice(b, b + batchSize)) {
       batchQuestions[key] = questions[key];
     }
-
-    const res = await fetch("https://openrouter.ai/api/alpha/decisions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "typesafe/jev-1.13",
-        state,
-        questions: batchQuestions,
-      }),
-    });
-
-    if (!res.ok) {
-      throw new Error(`Jev API error ${res.status}: ${await res.text()}`);
-    }
-
-    const data = await res.json();
-    Object.assign(answers, data.answers ?? {});
+    batchPromises.push(
+      (async () => {
+        const res = await fetch("https://openrouter.ai/api/alpha/decisions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: "typesafe/jev-1.13",
+            state,
+            questions: batchQuestions,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(`Jev API error ${res.status}: ${await res.text()}`);
+        }
+        const data = await res.json();
+        Object.assign(answers, data.answers ?? {});
+      })(),
+    );
   }
+  await Promise.all(batchPromises);
 
   const assignments = new Map<string, number[]>();
 

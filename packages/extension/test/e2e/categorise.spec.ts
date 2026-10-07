@@ -2,14 +2,11 @@ import { test, expect } from "./fixtures";
 import { MessageRequest } from "../../src/utils/types";
 import type { TestHarness } from "./fixtures";
 
-// real LLM (Flash-Lite + Jev via OpenRouter) by default; flip to false for
+// real LLM (joint GPT-5.4 via OpenRouter) by default; flip to false for
 // deterministic route-mocked runs
 const UseRealLlm = true;
 
-async function mockPropose(
-  bg: TestHarness,
-  candidates: unknown[],
-): Promise<void> {
+async function mockJoint(bg: TestHarness, groups: unknown[]): Promise<void> {
   await bg.context.route("**/api/v1/chat/completions", async (route) => {
     await route.fulfill({
       status: 200,
@@ -18,7 +15,7 @@ async function mockPropose(
         choices: [
           {
             message: {
-              content: JSON.stringify({ candidates }),
+              content: JSON.stringify({ groups }),
             },
           },
         ],
@@ -81,13 +78,7 @@ test("categorise shows candidates and groups", async ({ bg }) => {
       "https://en.wikipedia.org/wiki/Sea_otter",
     ]);
   } else {
-    await mockPropose(bg, [
-      { key: "test", title: "Test", description: "test" },
-    ]);
-    await mockDecisions(bg, {
-      tab_0: { choice: "r1-test" },
-      tab_1: { choice: "r1-test" },
-    });
+    await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0, 1] }]);
     await openTabs(bg, [
       "https://example.com/alpha",
       "https://example.com/beta",
@@ -121,8 +112,7 @@ test("categorise with a single tab still shows its group", async ({ bg }) => {
   await bg.skipOnboarding();
   await bg.seedCloudKey();
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, { tab_0: { choice: "r1-test" } });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0] }]);
   await openTabs(bg, ["https://example.com/alpha"]);
 
   const newtab = await runCategorise(bg);
@@ -140,11 +130,7 @@ test("categorise confirm applies changes", async ({ bg }) => {
   await bg.skipOnboarding();
   await bg.seedCloudKey();
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, {
-    tab_0: { choice: "r1-test" },
-    tab_1: { choice: "r1-test" },
-  });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0, 1] }]);
   await openTabs(bg, ["https://example.com/alpha", "https://example.com/beta"]);
 
   const newtab = await runCategorise(bg);
@@ -161,7 +147,7 @@ test("categorise confirm applies changes", async ({ bg }) => {
 });
 
 // quality check: real pipeline should split otters from rabbits
-test("categorise with real LLM (Flash-Lite + Jev)", async ({ bg }) => {
+test("categorise with real LLM (joint GPT-5.4)", async ({ bg }) => {
   const apiKey = process.env.OPENROUTER_API_KEY;
   test.skip(!apiKey, "OPENROUTER_API_KEY not set");
   test.setTimeout(120000);
@@ -200,11 +186,7 @@ test("categorise misc tabs stay open after confirm", async ({ bg }) => {
   await bg.skipOnboarding();
   await bg.seedCloudKey();
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, {
-    tab_0: { choice: "r1-test" },
-    tab_1: { choice: "r1-test" },
-  });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0, 1] }]);
   await openTabs(bg, ["https://example.com/alpha", "https://example.com/beta"]);
 
   const newtab = await runCategorise(bg);
@@ -257,8 +239,7 @@ test("categorise does not degrade existing website metadata", async ({
     ],
   });
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, { tab_0: { choice: "r1-test" } });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0] }]);
   await openTabs(bg, ["https://example.com/alpha"]);
 
   const newtab = await runCategorise(bg);
@@ -299,10 +280,9 @@ test("categorise keeps tabs open on apply error", async ({ bg }) => {
     description: "test",
   })) as { id: string };
 
-  await mockPropose(bg, [
-    { key: "test", title: "Test", description: "test", existingId: rh.id },
+  await mockJoint(bg, [
+    { title: "Test", description: "test", existingId: rh.id, tabs: [0] },
   ]);
-  await mockDecisions(bg, { tab_0: { choice: "r1-test" } });
   await openTabs(bg, ["https://example.com/alpha"]);
 
   const newtab = await runCategorise(bg);
@@ -337,8 +317,8 @@ test("categorise rerun works after editing candidates", async ({ bg }) => {
   await bg.skipOnboarding();
   await bg.seedCloudKey();
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, { tab_0: { choice: "r1-test" } });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0] }]);
+  await mockDecisions(bg, { tab_0: { choice: "g1" } });
   await openTabs(bg, ["https://example.com/alpha"]);
 
   const newtab = await runCategorise(bg);
@@ -375,14 +355,10 @@ test("categorise handles duplicate existingId without crashing", async ({
     description: "test",
   })) as { id: string; title: string };
 
-  await mockPropose(bg, [
-    { key: "a", title: "Alpha", description: "a", existingId: rh.id },
-    { key: "b", title: "Beta", description: "b", existingId: rh.id },
+  await mockJoint(bg, [
+    { title: "Alpha", description: "a", existingId: rh.id, tabs: [0] },
+    { title: "Beta", description: "b", existingId: rh.id, tabs: [1] },
   ]);
-  await mockDecisions(bg, {
-    tab_0: { choice: "r1-a" },
-    tab_1: { choice: "r1-b" },
-  });
   await openTabs(bg, ["https://example.com/alpha", "https://example.com/beta"]);
 
   const newtab = await runCategorise(bg);
@@ -405,8 +381,7 @@ test("categorise does not log the API key", async ({ bg }) => {
   await bg.skipOnboarding();
   await bg.seedCloudKey("sk-test-secret-key-123");
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, { tab_0: { choice: "r1-test" } });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0] }]);
   await openTabs(bg, ["https://example.com/alpha"]);
 
   const newtab = await runCategorise(bg);
@@ -447,8 +422,7 @@ test("categorise saves tabs with real metadata", async ({ bg }) => {
   await bg.skipOnboarding();
   await bg.seedCloudKey();
 
-  await mockPropose(bg, [{ key: "test", title: "Test", description: "test" }]);
-  await mockDecisions(bg, { tab_0: { choice: "r1-test" } });
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0] }]);
   await openTabs(bg, ["https://example.com/alpha"]);
 
   const newtab = await runCategorise(bg);
