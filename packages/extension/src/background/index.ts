@@ -27,7 +27,7 @@ import { initPostHog, capture, getPostHog } from "../utils/posthog";
 import { runJevAssignment } from "../llm/jev";
 import { runCategorisePipeline } from "../llm/pipeline";
 import type { RabbitholeContext, TabInfo } from "../utils/types";
-import type { Candidate } from "../llm/skills/propose";
+import type { Candidate } from "../llm/pipeline";
 
 type Handler = (
   request: any,
