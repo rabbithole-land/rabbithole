@@ -60,6 +60,15 @@
   let searchQuery: string = "";
   let searchInput: HTMLInputElement;
 
+  let selectedTabs: Set<number> = new Set();
+  let collapsedGroups: Set<string> = new Set();
+  let renamingGroupId: string | null = null;
+  let renameValue: string = "";
+  let savedUrls: Set<string> = new Set();
+  // bumped on every new run — a stale response from a superseded run is
+  // discarded instead of clobbering the current one
+  let runToken: number = 0;
+
   onMount(() => {
     checkSetup();
   });
@@ -121,6 +130,7 @@
   }
 
   async function runProposal(): Promise<void> {
+    const token = ++runToken;
     loading = true;
     error = null;
     candidates = [];
@@ -131,6 +141,11 @@
         type: MessageRequest.PROPOSE_CATEGORISE,
         cloudConfig,
       });
+
+      if (token !== runToken) {
+        // a newer run started while this one was in flight — drop it
+        return;
+      }
 
       if (result?.error) {
         const errStr = String(result.error);
@@ -165,10 +180,20 @@
         await runAssignment(true);
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : "Failed to propose categories";
+      if (token === runToken) {
+        error = e instanceof Error ? e.message : "Failed to propose categories";
+      }
     } finally {
-      loading = false;
+      if (token === runToken) {
+        loading = false;
+      }
     }
+  }
+
+  // abandons any in-flight run and starts the proposal over
+  function startOver(): void {
+    runToken++;
+    runProposal();
   }
 
   function candidateGroupId(c: Candidate): string {
@@ -249,6 +274,10 @@
       type: MessageRequest.GET_ALL_RABBITHOLES,
     });
 
+    // urls already living in a rabbithole — tab rows for these get a badge
+    savedUrls = new Set(allRabbitholes.flatMap((r) => r.meta ?? []));
+    selectedTabs = new Set();
+
     newRabbitholeDefs = new Map();
 
     groups = [];
@@ -296,6 +325,7 @@
   }
 
   async function runAssignment(isInitialRun: boolean = false): Promise<void> {
+    const token = ++runToken;
     // Only show the full-screen loading state for the initial run;
     // reruns keep the results visible with an inline indicator
     if (isInitialRun) {
@@ -316,6 +346,10 @@
       });
       logDebug("[categorise] runAssignment result:", result);
 
+      if (token !== runToken) {
+        return;
+      }
+
       if (result?.error) {
         error = result.error;
         return;
@@ -330,11 +364,81 @@
       dispatch("results");
     } catch (e) {
       logWarn("[categorise] runAssignment failed:", e);
-      error = e instanceof Error ? e.message : "Failed to assign tabs";
+      if (token === runToken) {
+        error = e instanceof Error ? e.message : "Failed to assign tabs";
+      }
     } finally {
-      loading = false;
-      rerunning = false;
+      if (token === runToken) {
+        loading = false;
+        rerunning = false;
+      }
     }
+  }
+
+  function toggleSelect(tabIdx: number): void {
+    if (selectedTabs.has(tabIdx)) {
+      selectedTabs.delete(tabIdx);
+    } else {
+      selectedTabs.add(tabIdx);
+    }
+    selectedTabs = selectedTabs;
+  }
+
+  function bulkMoveToMisc(): void {
+    for (const tabIdx of selectedTabs) {
+      moveTabToMisc(tabIdx);
+    }
+    selectedTabs = new Set();
+  }
+
+  function toggleCollapse(groupId: string): void {
+    if (collapsedGroups.has(groupId)) {
+      collapsedGroups.delete(groupId);
+    } else {
+      collapsedGroups.add(groupId);
+    }
+    collapsedGroups = collapsedGroups;
+  }
+
+  function startRename(group: CategoriseGroup): void {
+    renamingGroupId = group.id;
+    renameValue = group.title;
+  }
+
+  function commitRename(): void {
+    const group = groups.find((g) => g.id === renamingGroupId);
+    const title = renameValue.trim();
+    if (group && title) {
+      group.title = title;
+      // renaming a proposed rabbithole persists into the apply payload
+      if (group.isNew) {
+        const def = newRabbitholeDefs.get(group.id);
+        if (def) {
+          newRabbitholeDefs.set(group.id, { ...def, title });
+        }
+      }
+      groups = groups;
+    }
+    renamingGroupId = null;
+  }
+
+  // existing rabbitholes offered in the add panel — ones already proposed
+  // are excluded so they can't be added twice
+  $: availableExisting = allRabbitholes.filter(
+    (rh) => !candidates.some((c) => c.existingId === rh.id),
+  );
+
+  function pickExisting(rh: Rabbithole): void {
+    candidates.push({
+      key: rh.id,
+      title: rh.title,
+      description: rh.description ?? "",
+      existingId: rh.id,
+      userAdded: true,
+    });
+    candidates = candidates;
+    candidatesDirty = true;
+    closeAddCandidate();
   }
 
   function startMove(tabIdx: number): void {
@@ -358,7 +462,9 @@
     }
   }
 
-  function getMoveTargets(): { id: string; title: string; isNew: boolean }[] {
+  function getMoveTargets(
+    query: string,
+  ): { id: string; title: string; isNew: boolean }[] {
     const targets: { id: string; title: string; isNew: boolean }[] = [];
 
     for (const rh of allRabbitholes) {
@@ -374,8 +480,8 @@
       }
     }
 
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
+    if (query.trim()) {
+      const q = query.toLowerCase();
       return targets.filter((t) => t.title.toLowerCase().includes(q));
     }
 
@@ -672,6 +778,9 @@
   <div class="loading">
     <div class="spinner"></div>
     <p>Analyzing your tabs...</p>
+    <Button variant="subtle" color="gray" on:click={startOver}>
+      Start Over
+    </Button>
   </div>
 {:else if error && groups.length === 0}
   <div class="error-view">
@@ -758,6 +867,19 @@
                 class="add-desc"
                 rows="2"
               ></textarea>
+              {#if editingCandidateIdx === null && availableExisting.length > 0}
+                <div class="existing-list">
+                  <p class="existing-list-title">Or pick an existing one:</p>
+                  {#each availableExisting as rh (rh.id)}
+                    <button
+                      class="existing-rabbithole-option"
+                      on:click={() => pickExisting(rh)}
+                    >
+                      {rh.title}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
               <div class="add-panel-actions">
                 <Button
                   variant="subtle"
@@ -805,85 +927,128 @@
         <div class="editor-scroll" class:rerunning>
           {#each groups as group (group.id)}
             <div class="group-section" class:misc={group.isMisc}>
-              <div class="group-header">
-                <span class="group-title">{group.title}</span>
+              <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+              <div
+                class="group-header"
+                on:click={() => toggleCollapse(group.id)}
+              >
+                <span class="collapse-indicator"
+                  >{collapsedGroups.has(group.id) ? "▸" : "▾"}</span
+                >
+                {#if renamingGroupId === group.id}
+                  <!-- svelte-ignore a11y-autofocus -->
+                  <input
+                    class="rename-input"
+                    bind:value={renameValue}
+                    on:click|stopPropagation
+                    on:keydown={(e) => {
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") renamingGroupId = null;
+                    }}
+                    on:blur={commitRename}
+                  />
+                {:else}
+                  <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+                  <span
+                    class="group-title"
+                    title="Click to rename"
+                    on:click|stopPropagation={() => startRename(group)}
+                    >{group.title}</span
+                  >
+                {/if}
                 <span class="group-count">{group.tabIndices.length} tabs</span>
               </div>
-              {#if group.isNew && group.description}
+              {#if group.description}
                 <p class="group-desc">{group.description}</p>
               {/if}
-              <div class="tab-list">
-                {#each group.tabIndices as tabIdx (tabIdx)}
-                  <div class="tab-row">
-                    {#if tabs[tabIdx]?.favIconUrl}
-                      <img
-                        class="tab-favicon"
-                        src={tabs[tabIdx].favIconUrl}
-                        alt=""
-                        loading="lazy"
-                      />
-                    {:else}
-                      <span class="tab-favicon fallback"
-                        >{getDomain(tabs[tabIdx]?.url ?? "")
-                          .charAt(0)
-                          .toUpperCase() || "?"}</span
-                      >
-                    {/if}
-                    <div class="tab-info">
-                      <span class="tab-title"
-                        >{tabs[tabIdx]?.title || "Untitled"}</span
-                      >
-                      <span class="tab-domain"
-                        >{getDomain(tabs[tabIdx]?.url ?? "")}</span
-                      >
-                    </div>
-                    <button
-                      class="move-btn"
-                      class:active={movingTabIdx === tabIdx}
-                      on:click|stopPropagation={() => startMove(tabIdx)}
-                      data-label="Move to another rabbithole"
-                    >
-                      <ArrowRight size={14} />
-                    </button>
-                    {#if !group.isMisc}
-                      <button
-                        class="misc-btn"
-                        on:click|stopPropagation={() => moveTabToMisc(tabIdx)}
-                        data-label="Don't save — kept open in a separate window"
-                      >
-                        <Cross1 size={14} />
-                      </button>
-                    {/if}
-                    {#if movingTabIdx === tabIdx}
-                      <div class="move-panel" on:click|stopPropagation>
+              {#if !collapsedGroups.has(group.id)}
+                <div class="tab-list">
+                  {#each group.tabIndices as tabIdx (tabIdx)}
+                    <div class="tab-row">
+                      {#if !group.isMisc}
                         <input
-                          bind:this={searchInput}
-                          bind:value={searchQuery}
-                          placeholder="Search rabbitholes..."
-                          class="search-input"
+                          type="checkbox"
+                          class="tab-checkbox"
+                          checked={selectedTabs.has(tabIdx)}
+                          on:change={() => toggleSelect(tabIdx)}
                         />
-                        <div class="search-results">
-                          {#each getMoveTargets() as target (target.id)}
-                            <button
-                              class="search-result-item"
-                              on:click={() => moveTab(tabIdx, target.id)}
-                            >
-                              <span>{target.title}</span>
-                              {#if target.isNew}
-                                <span class="badge new-badge">new</span>
-                              {/if}
-                            </button>
-                          {:else}
-                            <div class="no-results">
-                              No matching rabbitholes
-                            </div>
-                          {/each}
-                        </div>
+                      {/if}
+                      {#if tabs[tabIdx]?.favIconUrl}
+                        <img
+                          class="tab-favicon"
+                          src={tabs[tabIdx].favIconUrl}
+                          alt=""
+                          loading="lazy"
+                        />
+                      {:else}
+                        <span class="tab-favicon fallback"
+                          >{getDomain(tabs[tabIdx]?.url ?? "")
+                            .charAt(0)
+                            .toUpperCase() || "?"}</span
+                        >
+                      {/if}
+                      <div class="tab-info">
+                        <span class="tab-title"
+                          >{tabs[tabIdx]?.title || "Untitled"}</span
+                        >
+                        <span class="tab-domain"
+                          >{getDomain(tabs[tabIdx]?.url ?? "")}</span
+                        >
                       </div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
+                      {#if savedUrls.has(tabs[tabIdx]?.url ?? "")}
+                        <span
+                          class="saved-badge"
+                          title="Already in a rabbithole">saved</span
+                        >
+                      {/if}
+                      <button
+                        class="move-btn"
+                        class:active={movingTabIdx === tabIdx}
+                        on:click|stopPropagation={() => startMove(tabIdx)}
+                        data-label="Move to another rabbithole"
+                      >
+                        <ArrowRight size={14} />
+                      </button>
+                      {#if !group.isMisc}
+                        <button
+                          class="misc-btn"
+                          on:click|stopPropagation={() => moveTabToMisc(tabIdx)}
+                          data-label="Don't save — kept open in a separate window"
+                        >
+                          <Cross1 size={14} />
+                        </button>
+                      {/if}
+                      {#if movingTabIdx === tabIdx}
+                        <div class="move-panel" on:click|stopPropagation>
+                          <input
+                            bind:this={searchInput}
+                            bind:value={searchQuery}
+                            placeholder="Search rabbitholes..."
+                            class="search-input"
+                          />
+                          <div class="search-results">
+                            {#each getMoveTargets(searchQuery) as target (target.id)}
+                              <button
+                                class="search-result-item"
+                                on:click={() => moveTab(tabIdx, target.id)}
+                              >
+                                <span>{target.title}</span>
+                                {#if target.isNew}
+                                  <span class="badge new-badge">new</span>
+                                {/if}
+                              </button>
+                            {:else}
+                              <div class="no-results">
+                                No matching rabbitholes
+                              </div>
+                            {/each}
+                          </div>
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
@@ -894,23 +1059,29 @@
       <p class="error inline-error">{error}</p>
     {/if}
 
-    <div class="action-bar">
-      {#if candidatesDirty}
-        <Button
-          variant="default"
-          color="gray"
-          on:click={() => runAssignment()}
-          disabled={rerunning}
-        >
-          {#if rerunning}
-            Rerunning...
-          {:else}
-            Rerun
-          {/if}
+    {#if selectedTabs.size > 0}
+      <div class="bulk-bar">
+        <span class="bulk-count">{selectedTabs.size} selected</span>
+        <Button variant="subtle" color="gray" on:click={bulkMoveToMisc}>
+          Don't save
         </Button>
-      {:else}
-        <span></span>
-      {/if}
+        <Button
+          variant="subtle"
+          color="gray"
+          on:click={() => (selectedTabs = new Set())}
+        >
+          Clear
+        </Button>
+      </div>
+    {/if}
+
+    <div class="action-bar">
+      <Button
+        variant="default"
+        color="gray"
+        on:click={() => runAssignment()}
+        disabled={rerunning}>{rerunning ? "Rerunning..." : "Rerun"}</Button
+      >
       <Button
         variant="light"
         color="blue"
@@ -954,6 +1125,98 @@
   .success-actions {
     display: flex;
     gap: 8px;
+  }
+
+  .collapse-indicator {
+    font-size: 11px;
+    color: #868e96;
+    width: 12px;
+  }
+
+  .rename-input {
+    padding: 2px 6px;
+    border: 1px solid #1185fe;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+  }
+
+  .tab-checkbox {
+    margin: 0 4px 0 0;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .saved-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(64, 192, 87, 0.15);
+    color: #2b8a3e;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    flex-shrink: 0;
+  }
+
+  :global(body.dark-mode) .saved-badge {
+    color: #69db7c;
+  }
+
+  .bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    background: rgba(17, 133, 254, 0.06);
+  }
+
+  .bulk-count {
+    font-size: 13px;
+    color: #495057;
+    margin-right: auto;
+  }
+
+  :global(body.dark-mode) .bulk-count {
+    color: #c1c2c5;
+  }
+
+  .existing-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .existing-list-title {
+    font-size: 11px;
+    color: #868e96;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  .existing-rabbithole-option {
+    text-align: left;
+    padding: 6px 8px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .existing-rabbithole-option:hover {
+    background: rgba(17, 133, 254, 0.08);
+    border-color: #1185fe;
   }
 
   .hint {
@@ -1335,6 +1598,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    cursor: pointer;
+    user-select: none;
     margin-bottom: 8px;
   }
 
