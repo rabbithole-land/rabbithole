@@ -319,6 +319,21 @@
       }
     }
 
+    // tabs the model left unassigned must not disappear — park them in
+    // Don't Save so every open tab stays visible in the review
+    const assigned = new Set(groups.flatMap((g) => g.tabIndices));
+    const unassigned = tabs.map((_, i) => i).filter((i) => !assigned.has(i));
+    if (unassigned.length > 0) {
+      groups.unshift({
+        id: MiscGroupId,
+        title: "Don't Save",
+        description: "",
+        isNew: false,
+        isMisc: true,
+        tabIndices: unassigned,
+      });
+    }
+
     rerunCount++;
     candidatesDirty = false;
     dispatch("results");

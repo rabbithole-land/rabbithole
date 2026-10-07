@@ -135,3 +135,22 @@ test("tabs already saved to a rabbithole are marked as saved", async ({
   const betaRow = newtab.locator(".tab-row", { hasText: "example.org" });
   await expect(betaRow.locator(".saved-badge")).toHaveCount(0);
 });
+
+// the model sometimes omits tabs from its grouping — dropped tabs must still
+// show up (in Don't Save) instead of disappearing from the review
+test("tabs the model leaves unassigned land in Don't Save", async ({ bg }) => {
+  await bg.skipOnboarding();
+  await bg.seedCloudKey();
+  // only tab 0 is grouped — tab 1 is dropped by the model
+  await mockJoint(bg, [{ title: "Test", description: "test", tabs: [0] }]);
+  await openTabs(bg, ["https://example.com/alpha", "https://example.org/beta"]);
+
+  const newtab = await runCategorise(bg);
+  await expect(newtab.locator(".candidate-list")).toContainText("Test", {
+    timeout: 10000,
+  });
+
+  const misc = newtab.locator(".group-section.misc");
+  await expect(misc).toContainText("1 tabs");
+  await expect(misc).toContainText("example.org");
+});
