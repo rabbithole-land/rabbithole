@@ -68,6 +68,9 @@
   }
 
   onMount(async () => {
+    chrome.storage.local
+      .get("loggingEnabled")
+      .then((v) => (loggingEnabled = v.loggingEnabled === true));
     settings = await chrome.runtime.sendMessage({
       type: MessageRequest.GET_SETTINGS,
     });
@@ -191,6 +194,14 @@
 
   async function handleDownloadLogs(): Promise<void> {
     await Logger.downloadLogs();
+  }
+
+  // persistent logging is opt-in (see utils/logger)
+  let loggingEnabled: boolean = false;
+
+  async function handleToggleLogging(): Promise<void> {
+    loggingEnabled = !loggingEnabled;
+    await chrome.storage.local.set({ loggingEnabled });
   }
 
   async function exportData(): Promise<void> {
@@ -522,6 +533,9 @@
           <Menu.Item icon={Download} on:click={exportData}
             >Export Data</Menu.Item
           >
+          <Menu.Item icon={FileText} on:click={handleToggleLogging}>
+            {loggingEnabled ? "Disable" : "Enable"} Logging
+          </Menu.Item>
           <Menu.Item icon={FileText} on:click={handleDownloadLogs}>
             Download Logs
           </Menu.Item>
@@ -582,6 +596,9 @@
             </Menu.Item>
             <Menu.Item icon={Download} on:click={exportData}>
               Export Data
+            </Menu.Item>
+            <Menu.Item icon={FileText} on:click={handleToggleLogging}>
+              {loggingEnabled ? "Disable" : "Enable"} Logging
             </Menu.Item>
             <Menu.Item icon={FileText} on:click={handleDownloadLogs}>
               Download Logs
