@@ -38,6 +38,12 @@ async function saveLog(level: LogLevel, message: string, data?: any) {
   }
 
   try {
+    // persistent logging is opt-in — console output above always happens
+    const { loggingEnabled } = await chrome.storage.local.get("loggingEnabled");
+    if (loggingEnabled !== true) {
+      return;
+    }
+
     const result = await chrome.storage.local.get(LOG_STORAGE_KEY);
     let logs: LogEntry[] = result[LOG_STORAGE_KEY] || [];
 
